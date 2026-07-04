@@ -1,0 +1,31 @@
+{
+  "name": "dagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dagent": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.5.0",
+    "commander": "^14.0.0",
+    "openai": "^5.8.2",
+    "ssh2": "^1.16.0",
+    "yaml": "^2.8.0",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.34",
+    "@types/ssh2": "^1.15.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
