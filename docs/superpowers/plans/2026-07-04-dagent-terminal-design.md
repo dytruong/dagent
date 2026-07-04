@@ -13,7 +13,6 @@
 ## File Structure
 
 - Create: `package.json` - scripts, runtime dependencies, dev dependencies, package metadata, and `bin` entry.
-- Create: `scripts/install-dagent.mjs` - local installer that detects LM Studio or Ollama, asks for confirmation, builds the CLI, and links the `dagent` terminal command.
 - Create: `tsconfig.json` - strict TypeScript configuration for `src/` and `tests/`.
 - Create: `vitest.config.ts` - Vitest configuration.
 - Create: `src/cli.ts` - executable CLI entrypoint that starts the interactive terminal app.
@@ -40,7 +39,8 @@
 - Create: `src/types.ts` - shared types for servers, tools, policy, model messages, and session events.
 - Create: `rules/global.md` - initial human-readable global rules.
 - Create: `rules/tools.yaml` - initial local policy for built-in tools.
-- Create: `tests/**` - focused unit tests and orchestrator tests with mocked LM Studio, Ollama, installer process execution, and SSH.
+- Create: `rules/servers/.gitkeep` - preserves the server-specific rules directory from the initial policy layout.
+- Create: `tests/**` - focused unit tests and orchestrator tests with mocked LM Studio and SSH.
 
 ## Task 1: Project Scaffold and CLI Smoke Test
 
@@ -103,7 +103,6 @@ Expected: FAIL with an import error for `../src/app/terminal-app`.
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
-    "install:local": "node scripts/install-dagent.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -535,6 +534,27 @@ describe("server store", () => {
       }),
     ).rejects.toThrow("Invalid server alias");
   });
+
+  it("lists registered aliases", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dagent-server-store-"));
+    const store = createServerStore(root);
+    await store.save({
+      alias: "prod-api",
+      host: "prod.example.com",
+      username: "deploy",
+      port: 22,
+      auth: { method: "password", storage: "prompt-per-session" },
+    });
+    await store.save({
+      alias: "dytruong-remote",
+      host: "dytruong.example.com",
+      username: "deploy",
+      port: 22,
+      auth: { method: "certificate", keyPath: "~/.ssh/dytruong_remote" },
+    });
+
+    expect(await store.list()).toEqual(["dytruong-remote", "prod-api"]);
+  });
 });
 ```
 
@@ -627,7 +647,7 @@ export function getDagentPaths(root = process.cwd()): DagentPaths {
 
 ```ts
 // src/server/server-store.ts
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
@@ -670,6 +690,20 @@ export function createServerStore(root = process.cwd()) {
       }
       const yaml = await readFile(join(paths.serversDir, `${alias}.yaml`), "utf8");
       return serverSchema.parse(YAML.parse(yaml));
+    },
+
+    async list(): Promise<string[]> {
+      try {
+        const entries = await readdir(paths.serversDir);
+        return entries
+          .filter((entry) => entry.endsWith(".yaml"))
+          .map((entry) => entry.slice(0, -".yaml".length))
+          .filter(isSafeServerAlias)
+          .sort();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
     },
   };
 }
@@ -752,6 +786,7 @@ git commit -m "feat: add server registration storage"
 - Create: `src/policy/policy-engine.ts`
 - Create: `rules/global.md`
 - Create: `rules/tools.yaml`
+- Create: `rules/servers/.gitkeep`
 - Create: `tests/tools/tool-registry.test.ts`
 - Create: `tests/policy/policy-engine.test.ts`
 
@@ -829,6 +864,16 @@ describe("policy engine", () => {
     await writeFile(join(root, "rules", "tools.yaml"), "deniedTools:\n  - process.list\n", "utf8");
     const policy = await createPolicyEngine(root);
     expect(policy.decide({ toolName: "process.list", safety: "read-only", targetAlias: "prod-api" }).allowed).toBe(false);
+  });
+
+  it("includes server-specific rules in model context", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dagent-policy-"));
+    await mkdir(join(root, "rules", "servers"), { recursive: true });
+    await writeFile(join(root, "rules", "global.md"), "Prefer read-only tools.\n", "utf8");
+    await writeFile(join(root, "rules", "servers", "prod-api.md"), "prod-api critical service: nginx\n", "utf8");
+    const policy = await createPolicyEngine(root);
+    expect(policy.modelContext("prod-api")).toContain("Prefer read-only tools.");
+    expect(policy.modelContext("prod-api")).toContain("prod-api critical service: nginx");
   });
 });
 ```
@@ -943,7 +988,7 @@ export interface PolicyRequest {
 
 export interface PolicyEngine {
   decide(request: PolicyRequest): PolicyDecision;
-  modelContext(): string;
+  modelContext(targetAlias?: string): string;
 }
 
 interface ToolRules {
@@ -954,6 +999,7 @@ interface ToolRules {
 export async function createPolicyEngine(root = process.cwd()): Promise<PolicyEngine> {
   let toolRules: ToolRules = {};
   let globalRules = "";
+  const serverRules = new Map<string, string>();
 
   try {
     const text = await readFile(join(root, "rules", "tools.yaml"), "utf8");
@@ -964,6 +1010,16 @@ export async function createPolicyEngine(root = process.cwd()): Promise<PolicyEn
 
   try {
     globalRules = await readFile(join(root, "rules", "global.md"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  try {
+    const { readdir } = await import("node:fs/promises");
+    const entries = await readdir(join(root, "rules", "servers"));
+    for (const entry of entries.filter((name) => name.endsWith(".md"))) {
+      serverRules.set(entry.slice(0, -".md".length), await readFile(join(root, "rules", "servers", entry), "utf8"));
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -981,8 +1037,8 @@ export async function createPolicyEngine(root = process.cwd()): Promise<PolicyEn
       }
       return { allowed: true, requiresApproval: false, reason: "Read-only tool allowed by default" };
     },
-    modelContext(): string {
-      return globalRules;
+    modelContext(targetAlias?: string): string {
+      return [globalRules, targetAlias ? serverRules.get(targetAlias) : undefined].filter(Boolean).join("\n");
     },
   };
 }
@@ -1007,6 +1063,10 @@ deniedTools: []
 approvalRequiredTools: []
 ```
 
+```text
+# rules/servers/.gitkeep
+```
+
 - [ ] **Step 7: Run verification**
 
 Run: `npm test -- tests/tools/tool-registry.test.ts tests/policy/policy-engine.test.ts`
@@ -1020,7 +1080,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/tools/tool-registry.ts src/policy/policy-engine.ts rules/global.md rules/tools.yaml tests/tools/tool-registry.test.ts tests/policy/policy-engine.test.ts
+git add src/tools/tool-registry.ts src/policy/policy-engine.ts rules/global.md rules/tools.yaml rules/servers/.gitkeep tests/tools/tool-registry.test.ts tests/policy/policy-engine.test.ts
 git commit -m "feat: add tool registry and policy engine"
 ```
 
@@ -1684,9 +1744,9 @@ import { classifyRegistrationPrompt } from "./registration-classifier.js";
 
 export interface OrchestratorDeps {
   model: { complete(request: { messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string; name?: string }>; tools: unknown[] }): Promise<{ type: "message"; content: string } | { type: "tool-call"; toolName: string; args: unknown }> };
-  serverStore: { load(alias: string): Promise<unknown> };
+  serverStore: { load(alias: string): Promise<unknown>; list(): Promise<string[]> };
   memoryStore: { loadGlobal(): Promise<string>; loadServer(alias: string): Promise<string> };
-  policy: { decide(request: { toolName: string; safety: "read-only" | "state-changing" | "destructive"; targetAlias: string }): { allowed: boolean; requiresApproval: boolean; reason: string }; modelContext(): string };
+  policy: { decide(request: { toolName: string; safety: "read-only" | "state-changing" | "destructive"; targetAlias: string }): { allowed: boolean; requiresApproval: boolean; reason: string }; modelContext(targetAlias?: string): string };
   toolRegistry: { get(name: string): { name: string; safety: "read-only" | "state-changing" | "destructive"; validateArgs(input: unknown): unknown; execute(args: unknown, context: { targetAlias: string }): Promise<unknown> } };
   approvals: { approve(message: string): Promise<boolean> };
   sessionLog: { write(event: Record<string, unknown> & { type: string }): Promise<void> };
@@ -1710,11 +1770,19 @@ export function createOrchestrator(deps: OrchestratorDeps) {
       }
 
       deps.render.status("Thinking: identify the right tool");
-      await deps.serverStore.load(parsed.targetAlias);
+      try {
+        await deps.serverStore.load(parsed.targetAlias);
+      } catch (error) {
+        const aliases = await deps.serverStore.list();
+        const suffix = aliases.length > 0 ? ` Available aliases: ${aliases.join(", ")}` : " No servers are registered yet.";
+        deps.render.error(`Unknown server alias: ${parsed.targetAlias}.${suffix}`);
+        await deps.sessionLog.write({ type: "unknown-server", targetAlias: parsed.targetAlias, availableAliases: aliases });
+        return;
+      }
       const memory = [await deps.memoryStore.loadGlobal(), await deps.memoryStore.loadServer(parsed.targetAlias)].filter(Boolean).join("\n");
       const messages = [
         { role: "system" as const, content: createSystemPrompt() },
-        { role: "system" as const, content: deps.policy.modelContext() },
+        { role: "system" as const, content: deps.policy.modelContext(parsed.targetAlias) },
         { role: "system" as const, content: memory },
         { role: "user" as const, content: parsed.prompt },
       ];
@@ -2003,197 +2071,7 @@ git add src/app/terminal-app.ts src/cli.ts tests/app/terminal-app.test.ts tests/
 git commit -m "feat: wire interactive dagent cli"
 ```
 
-## Task 9: Local Installer with LM Studio and Ollama Detection
-
-**Files:**
-- Create: `scripts/install-dagent.mjs`
-- Create: `tests/install-dagent.test.ts`
-- Modify: `package.json`
-
-- [ ] **Step 1: Write installer tests**
-
-```ts
-// tests/install-dagent.test.ts
-import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
-
-describe("install-dagent script", () => {
-  it("detects LM Studio before Ollama and asks for confirmation", async () => {
-    const script = await readFile("scripts/install-dagent.mjs", "utf8");
-    expect(script).toContain("http://127.0.0.1:1234/v1/models");
-    expect(script).toContain("http://127.0.0.1:11434/api/tags");
-    expect(script).toContain("Install dagent terminal now?");
-    expect(script.indexOf("detectLmStudio")).toBeLessThan(script.indexOf("detectOllama"));
-  });
-
-  it("builds and links only after the user confirms installation", async () => {
-    const script = await readFile("scripts/install-dagent.mjs", "utf8");
-    expect(script).toContain("if (!confirmed)");
-    expect(script).toContain("run(\"npm\", [\"install\"])");
-    expect(script).toContain("run(\"npm\", [\"run\", \"build\"])");
-    expect(script).toContain("run(\"npm\", [\"link\"])");
-  });
-
-  it("passes detected local model backend defaults to the user-facing output", async () => {
-    const script = await readFile("scripts/install-dagent.mjs", "utf8");
-    expect(script).toContain("LM Studio");
-    expect(script).toContain("Ollama");
-    expect(script).toContain("--lm-studio-url");
-    expect(script).toContain("DAGENT_MODEL_PROVIDER");
-  });
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `npm test -- tests/install-dagent.test.ts`
-
-Expected: FAIL because `scripts/install-dagent.mjs` does not exist.
-
-- [ ] **Step 3: Create the installer script**
-
-```js
-// scripts/install-dagent.mjs
-#!/usr/bin/env node
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
-
-const PROVIDERS = {
-  lmStudio: {
-    name: "LM Studio",
-    envValue: "lm-studio",
-    healthUrl: "http://127.0.0.1:1234/v1/models",
-    cliArgs: "--lm-studio-url http://127.0.0.1:1234/v1",
-  },
-  ollama: {
-    name: "Ollama",
-    envValue: "ollama",
-    healthUrl: "http://127.0.0.1:11434/api/tags",
-    cliArgs: "--lm-studio-url http://127.0.0.1:11434/v1",
-  },
-};
-
-async function canFetchJson(url) {
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-export async function detectLmStudio() {
-  return (await canFetchJson(PROVIDERS.lmStudio.healthUrl)) ? PROVIDERS.lmStudio : undefined;
-}
-
-export async function detectOllama() {
-  return (await canFetchJson(PROVIDERS.ollama.healthUrl)) ? PROVIDERS.ollama : undefined;
-}
-
-export async function detectLocalModelProvider() {
-  return (await detectLmStudio()) ?? (await detectOllama());
-}
-
-export async function askConfirmation(provider) {
-  const readline = createInterface({ input, output });
-  const providerText = provider
-    ? `${provider.name} detected at ${provider.healthUrl}`
-    : "No LM Studio or Ollama server detected on the default local ports";
-  const answer = await readline.question(`${providerText}.\nInstall dagent terminal now? [y/N] `);
-  readline.close();
-  return /^y(es)?$/i.test(answer.trim());
-}
-
-export function run(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit", shell: false });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`${command} ${args.join(" ")} exited with ${code}`));
-    });
-  });
-}
-
-export async function main() {
-  const provider = await detectLocalModelProvider();
-  const confirmed = await askConfirmation(provider);
-  if (!confirmed) {
-    output.write("Install cancelled. No files were changed by the installer.\n");
-    return;
-  }
-
-  await run("npm", ["install"]);
-  await run("npm", ["run", "build"]);
-  await run("npm", ["link"]);
-
-  if (provider) {
-    output.write(`dagent installed. ${provider.name} will be used by default.\n`);
-    output.write(`Run: DAGENT_MODEL_PROVIDER=${provider.envValue} dagent ${provider.cliArgs}\n`);
-  } else {
-    output.write("dagent installed. Start LM Studio or Ollama locally before running model-backed prompts.\n");
-    output.write("Run: dagent --lm-studio-url http://127.0.0.1:1234/v1\n");
-  }
-}
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
-    console.error(error.message);
-    process.exitCode = 1;
-  });
-}
-```
-
-- [ ] **Step 4: Ensure the package exposes the installer command**
-
-```json
-// package.json scripts excerpt
-{
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/cli.ts",
-    "install:local": "node scripts/install-dagent.mjs",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
-  }
-}
-```
-
-- [ ] **Step 5: Run verification**
-
-Run: `npm test -- tests/install-dagent.test.ts`
-
-Expected: PASS.
-
-Run: `npm run typecheck`
-
-Expected: PASS.
-
-Run: `npm run build`
-
-Expected: PASS.
-
-- [ ] **Step 6: Manually verify the confirmation gate**
-
-Run: `npm run install:local`
-
-Expected: The script prints whether LM Studio or Ollama was detected locally, then asks `Install dagent terminal now? [y/N]`. Answer `n`.
-
-Expected: The script exits with `Install cancelled. No files were changed by the installer.` and does not run `npm install`, `npm run build`, or `npm link`.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add package.json scripts/install-dagent.mjs tests/install-dagent.test.ts
-git commit -m "feat: add local dagent installer"
-```
-
-## Task 10: Error Handling Coverage and Milestone Documentation
+## Task 9: Error Handling Coverage and Milestone Documentation
 
 **Files:**
 - Create: `tests/orchestrator/error-handling.test.ts`
@@ -2264,28 +2142,14 @@ Expected: PASS. If it fails because an error path is missing, update `src/orches
 ## Requirements
 
 - Node.js 22 or newer
-- LM Studio running an OpenAI-compatible API at `http://localhost:1234/v1` or Ollama running at `http://localhost:11434`
+- LM Studio running an OpenAI-compatible API at `http://localhost:1234/v1`
 - SSH access to registered servers
-
-## Install the Terminal
-
-```bash
-npm install
-npm run build
-npm run install:local
-```
-
-The installer detects LM Studio first, then Ollama. It prints the detected local model backend and asks:
-
-```text
-Install dagent terminal now? [y/N]
-```
-
-Answering `n` cancels before `npm install`, `npm run build`, or `npm link` runs.
 
 ## Start
 
 ```bash
+npm install
+npm run build
 npm run dev
 ```
 
@@ -2348,19 +2212,17 @@ git commit -m "docs: document dagent milestone"
 Spec coverage:
 - Interactive terminal app: Task 1 and Task 8.
 - LM Studio connection: Task 7 and Task 8.
-- Ollama-compatible local backend detection for install: Task 9.
-- Local terminal installation with explicit user confirmation: Task 9.
 - Guided server registration: Task 3 and Task 8.
 - Server config loading and secret-free writing: Task 3.
 - SSH execution layer: Task 5.
 - Visible tool traces and status rendering: Task 7 and Task 8.
-- Approval flow: Task 7, Task 8, and Task 10.
+- Approval flow: Task 7, Task 8, and Task 9.
 - Built-in tools `systemd.logs`, `systemd.status`, `disk.usage`, `process.list`: Task 4 and Task 5.
 - Local file-backed memory and redaction: Task 6.
 - `rules/` loading and authoritative policy: Task 4.
 - Session JSONL event writing: Task 6.
 - Final response validation and repair: Task 2 and Task 7.
-- Error handling for unknown targets, approvals, model/report failures, policy denial, and registration validation: Tasks 2, 3, 4, 7, and 10.
+- Error handling for unknown targets, approvals, model/report failures, policy denial, and registration validation: Tasks 2, 3, 4, 7, and 9.
 
 Placeholder scan:
 - No task uses undefined path names.
