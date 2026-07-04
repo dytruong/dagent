@@ -8,6 +8,41 @@
 - LM Studio running an OpenAI-compatible API at `http://localhost:1234/v1`
 - SSH access to registered servers
 
+## Install
+
+Install from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dytruong/dagent/main/scripts/install.sh | bash
+```
+
+The installer clones `dagent` into `~/.dagent/dagent`, runs `npm install` and `npm run build`, then writes a launcher to `~/.local/bin/dagent`.
+
+LM Studio is the default provider:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dytruong/dagent/main/scripts/install.sh \
+  | DAGENT_PROVIDER=lm-studio DAGENT_MODEL=local-model bash
+```
+
+Use Ollama instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dytruong/dagent/main/scripts/install.sh \
+  | DAGENT_PROVIDER=ollama DAGENT_MODEL=llama3.1 bash
+```
+
+If `dagent` is not found after installation, add `~/.local/bin` to your `PATH`.
+
+Installer settings:
+
+- `DAGENT_PROVIDER`: `lm-studio` or `ollama`
+- `DAGENT_BASE_URL`: OpenAI-compatible API base URL
+- `DAGENT_MODEL`: model name
+- `DAGENT_INSTALL_DIR`: checkout directory, default `~/.dagent/dagent`
+- `DAGENT_BIN_DIR`: launcher directory, default `~/.local/bin`
+- `DAGENT_REPO_URL`: git repository URL, default `https://github.com/dytruong/dagent.git`
+
 ## Start
 
 ```bash
