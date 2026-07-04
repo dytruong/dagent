@@ -28,8 +28,11 @@ export function createTerminalApp(deps: TerminalAppDeps) {
           deps.input.close();
           return;
         }
-        if (trimmed.length > 0) {
+        if (trimmed.length === 0) continue;
+        try {
           await deps.orchestrator.handlePrompt(trimmed);
+        } catch (error) {
+          deps.output.write(`Error: ${(error as Error).message}\n`);
         }
       }
     },
