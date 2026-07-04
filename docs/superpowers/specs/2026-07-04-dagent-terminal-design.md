@@ -12,6 +12,13 @@ Example prompt:
 
 The assistant uses LM Studio as its model backend. It must not receive direct shell control. It can only request registered tools, and the local CLI executes those tools over SSH after validating policy.
 
+## Product Targets
+
+- Fast terminal experience: startup, prompt handling, streaming output, and tool-call rendering should feel immediate. Slow network, SSH, or model operations should show useful progress instead of blocking silently.
+- Clear information: the UI should make the current target server, selected tool, arguments, approval status, command progress, evidence, conclusion, and next actions easy to scan.
+- Friendly UX: common flows such as registering a server, running a log check, approving a restart, and reviewing previous context should be guided and forgiving without hiding important details.
+- Safe by default: the model never receives direct shell access, secrets are not persisted, read-only tools are preferred, state-changing tools require approval, destructive tools are blocked in version 1, and local policy enforcement is authoritative.
+
 ## Non-Goals
 
 - Do not install a daemon on remote servers in the first version.
