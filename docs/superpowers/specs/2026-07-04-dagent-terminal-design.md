@@ -65,6 +65,50 @@ The terminal should show:
 - streamed or progressive tool output
 - final structured report
 
+### Server Registration Flow
+
+The user can register a remote server from the same prompt interface:
+
+```text
+> add remote server name dytruong-remote
+```
+
+The assistant should recognize this as an onboarding action and start a guided registration flow:
+
+```text
+Register remote server: dytruong-remote
+Username:
+Port [22]:
+DNS name or IP address:
+Authentication method: password or certificate?
+```
+
+If the user chooses certificate authentication, the CLI asks for the private key path:
+
+```text
+Certificate path:
+```
+
+The server config stores the alias, host, username, port, authentication method, and certificate path. It must not copy the private key into `.dagent/` or session logs.
+
+If the user chooses password authentication, the CLI must not save the password as base64. Base64 is reversible encoding, not encryption, and would expose the password to anyone who can read the config or session files. The safer version 1 behavior is:
+
+- prompt for the password using hidden input when an SSH tool first needs it
+- keep the password only in process memory for the current app session
+- never send the password to LM Studio
+- never write the password to memory files, config files, or JSONL session logs
+
+If persistent password reuse is needed later, the CLI should integrate with the operating system credential store, such as macOS Keychain, Windows Credential Manager, or Linux Secret Service. SSH keys plus `ssh-agent` should be the recommended long-term authentication method.
+
+After successful registration, the assistant should offer a read-only connection test:
+
+```text
+Server dytruong-remote registered.
+Run a connection test now? [Y/n]
+```
+
+The test should verify that SSH connects and basic read-only commands can run. It should not run diagnostics beyond connectivity unless the user asks.
+
 ## Final Response Contract
 
 Every completed request must end with these sections:
@@ -225,10 +269,39 @@ Server configuration maps aliases to SSH connection details:
 
 ```text
 servers/
+  dytruong-remote.yaml
   prod-api.yaml
 ```
 
-Each server config should include alias, host, SSH username, port, and optional metadata such as environment, region, known services, and tags. Secrets should not be stored in these files.
+Each server config should include alias, host, SSH username, port, authentication method, optional certificate path, and optional metadata such as environment, region, known services, and tags. Secrets should not be stored in these files.
+
+Example certificate-backed config:
+
+```yaml
+alias: dytruong-remote
+host: dytruong.example.com
+username: deploy
+port: 22
+auth:
+  method: certificate
+  keyPath: ~/.ssh/dytruong_remote
+tags:
+  - personal
+```
+
+Example password-backed config:
+
+```yaml
+alias: dytruong-remote
+host: 203.0.113.10
+username: deploy
+port: 22
+auth:
+  method: password
+  storage: prompt-per-session
+```
+
+The password-backed config records only the authentication strategy. The password itself is entered through hidden input when needed and stays in process memory for the active session.
 
 ## Data Flow
 
@@ -245,9 +318,24 @@ For `/prod-api get systemd logs 10 minutes ago`:
 9. Model returns a final report with Summary, Evidence, Conclusion, and Next Actions.
 10. Orchestrator validates the report sections and renders it.
 
+For `add remote server name dytruong-remote`:
+
+1. Terminal UI accepts the prompt.
+2. Orchestrator classifies the prompt as server registration.
+3. CLI asks for username, port, host, and authentication method.
+4. CLI asks for certificate path when certificate authentication is selected.
+5. CLI records `prompt-per-session` when password authentication is selected.
+6. Server config is written without secrets.
+7. CLI offers a read-only SSH connection test.
+8. Successful test output is summarized and may be saved as non-secret server memory.
+
 ## Error Handling
 
 - Unknown server alias: show available aliases and do not call the model unless useful.
+- Duplicate server alias during registration: ask whether to update the existing server config or cancel.
+- Invalid server alias: reject names that cannot be used as `/alias` prompt targets or safe filenames.
+- Invalid certificate path: explain that the key file was not found or is unreadable and ask for a new path.
+- Password authentication selected: use hidden input and never echo, log, send to the model, or persist the password.
 - SSH connection failure: return a clear failure report with attempted host, error class, and safe next checks.
 - Tool validation failure: reject the tool call and ask the model to repair arguments.
 - Policy denial: explain which rule blocked the action and suggest allowed alternatives.
@@ -260,7 +348,12 @@ For `/prod-api get systemd logs 10 minutes ago`:
 Initial tests should cover:
 
 - prompt target parsing
+- server registration prompt classification
+- server registration config writing without secrets
+- duplicate and invalid server alias handling
 - server config loading
+- password hidden-input flow with no persisted secret
+- certificate path validation
 - rules loading and policy decisions
 - tool schema validation
 - read-only tool execution path with a mocked SSH executor
@@ -277,6 +370,7 @@ The first useful version should include:
 
 - interactive terminal app
 - LM Studio connection
+- guided remote server registration
 - server config loading
 - SSH execution layer
 - visible tool traces
